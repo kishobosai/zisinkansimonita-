@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>地球環境監視コンソール - リアルタイムモニター</title>
+    
+    <!-- 外部ライブラリの読み込み -->
+    <!-- Tailwind CSS (デザイン) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet (地図) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- Tone.js (サウンド生成 - Sonification) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+
+    <style>
+        /* カスタムスタイル - Cyberpunk / Sci-Fi HUD aesthetic */
+        :root {
+            --primary-color: #00f3ff; /* シアン */
+            --alert-color: #ff2a2a;   /* 赤 */
+            --warning-color: #ffae00; /* オレンジ */
+            --bg-color: #0d1b33;
+            --grid-color: rgba(0, 243, 255, 0.1);
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--primary-color);
+            font-family: 'Share Tech Mono', 'Noto Sans JP', sans-serif;
+            margin: 0;
+            overflow: hidden;
+            user-select: none;
+        }
+
+        /* スキャンライン効果 */
+        .scanlines {
+            position: fixed;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.05) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.02), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.02));
+            background-size: 100% 3px, 3px 100%;
+            pointer-events: none;
+            z-index: 9999;
+            opacity: 0.1; 
+        }
+
+        /* グリッドオーバーレイ */
+        .hud-grid {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background-image: linear-gradient(var(--grid-color) 1px, transparent 1px), linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        /* マップスタイル */
+        #map {
+            width: 100vw; height: 100vh;
+            filter: contrast(1.05) saturate(1.1) brightness(1.2); 
+            z-index: 1;
+            background: #152036;
+        }
+
+        /* 地震マーカーアニメーション */
+        .quake-pulse {
+            border-radius: 50%;
+            animation: pulse-animation 2s infinite;
+        }
+        @keyframes pulse-animation {
+            0% { box-shadow: 0 0 0 0 rgba(255, 42, 42, 0.7); }
+            70% { box-shadow: 0 0 0 20px rgba(255, 42, 42, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 42, 42, 0); }
+        }
+
+        /* HUDパネル共通 */
+        .hud-panel {
+            background: rgba(10, 20, 40, 0.85);
+            border: 1px solid var(--primary-color);
+            box-shadow: 0 0 10px rgba(0, 243, 255, 0.1);
+            backdrop-filter: blur(4px);
+            z-index: 100;
+        }
+
+        .blink { animation: blinker 1s linear infinite; }
+        @keyframes blinker { 50% { opacity: 0.3; } }
+
+        /* スクロールバー非表示 */
+        ::-webkit-scrollbar { width: 0px; background: transparent; }
+
+        /* スタートオーバーレイ */
+        #start-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(10, 20, 40, 0.95);
+            z-index: 10000;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            cursor: pointer; text-align: center;
+        }
+
+        /* 緊急アラートバー */
+        #alert-bar {
+            position: fixed; top: 0; left: 0; width: 100%;
+            background: linear-gradient(90deg, rgba(255,0,0,0.8), rgba(100,0,0,0.9), rgba(255,0,0,0.8));
+            color: white;
+            padding: 10px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 1.5rem;
+            z-index: 2000;
+            display: none; /* デフォルト非表示 */
+            border-bottom: 2px solid red;
+            box-shadow: 0 0 20px red;
+            letter-spacing: 0.1em;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- エフェクトレイヤー -->
+    <div class="scanlines"></div>
+    <div class="hud-grid"></div>
+
+    <!-- 緊急アラートバー -->
+    <div id="alert-bar" class="blink">
+        ⚠ CAUTION: M6+ LARGE EARTHQUAKE DETECTED ⚠
+    </div>
+
+    <!-- スタート画面 -->
+    <div id="start-overlay" onclick="initializeSystem()">
+        <h1 class="text-3xl md:text-5xl font-bold mb-4 tracking-widest text-cyan-400 drop-shadow-[0_0_10px_rgba(0,243,255,0.8)]">システム初期化</h1>
+        <p class="text-xl text-gray-300 blink">CLICK TO CONNECT</p>
+        <p class="text-sm text-gray-500 mt-8">Earth Monitor v5.3</p>
+    </div>
+
+    <!-- Map Container -->
+    <div id="map"></div>
+
+    <!-- HUD Interface -->
+    
+    <!-- Top Bar -->
+    <div class="absolute top-12 left-0 w-full p-2 flex justify-between items-start pointer-events-none z-50">
+        <!-- Header -->
+        <div class="hud-panel p-2 rounded-br-lg border-l-4 border-l-cyan-400 pointer-events-auto">
+            <h2 class="text-lg font-bold tracking-widest leading-none">EARTH_MONITOR <span class="text-[10px] ml-1 opacity-70 border border-cyan-400 px-0.5 rounded align-middle">LIVE</span></h2>
+            <div class="text-[10px] text-cyan-200 mt-0.5" id="clock">00:00:00</div>
+        </div>
+        
+        <!-- Stats -->
+        <div class="hud-panel p-1 flex gap-2 rounded-bl-lg border-r-4 border-r-red-500 pointer-events-auto bg-opacity-90">
+            <div class="text-center px-2 border-r border-gray-700">
+                <div class="text-[8px] text-gray-400">EVENTS</div>
+                <div class="text-lg font-bold text-cyan-400 leading-none" id="count-display">0</div>
+            </div>
+            <div class="text-center px-2 border-r border-gray-700">
+                <div class="text-[8px] text-gray-400">MAX MAG</div>
+                <div class="text-lg font-bold text-yellow-400 leading-none" id="max-mag-display">0.0</div>
+            </div>
+            <div class="text-center px-2">
+                <div class="text-[8px] text-gray-400">STATUS</div>
+                <div class="text-lg font-bold text-green-400 blink leading-none" id="status-display">OK</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Side: Recent Significant Events -->
+    <div class="absolute top-32 right-2 w-48 pointer-events-none z-50 flex flex-col gap-2">
+        <!-- Event List -->
+        <div class="hud-panel p-0 border-r-2 border-r-yellow-500 rounded-l-lg overflow-hidden pointer-events-auto">
+            <div class="bg-yellow-900/40 p-1 px-2 text-[10px] font-bold text-yellow-400 flex justify-between items-center">
+                <span>検知ログ (M4.0+)</span>
+                <span class="w-1.5 h-1.5 bg-yellow-400 rounded-full blink"></span>
+            </div>
+            <div id="event-list" class="max-h-48 overflow-y-auto">
+                <!-- Event items injected here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. GLOBAL CONFIG & STATE ---
+        const CONFIG = {
+            usgsUrl: 'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson',
+            updateInterval: 60000,
+            maxMarkers: 300,
+            minMag: 4.0
+        };
+
+        let map;
+        let earthquakeLayer;
+        let knownEventIds = new Set();
+        let isSystemActive = false;
+        
+        let currentMaxMag = 0;
+        let priorityEvent = null;
+
+        // Tone.js Instruments
+        let synth;
+        let drone; // 環境音用
+
+        // --- 2. INITIALIZATION ---
+        async function initializeSystem() {
+            document.getElementById('start-overlay').style.display = 'none';
+            isSystemActive = true;
+
+            await Tone.start();
+            initAudio();
+            initMap();
+            
+            fetchData();
+            setInterval(fetchData, CONFIG.updateInterval);
+            setInterval(updateClock, 1000);
+        }
+
+        // --- 3. MAP SETUP ---
+        function initMap() {
+            map = L.map('map', {
+                zoomControl: true, 
+                attributionControl: false,
+                minZoom: 2, 
+                maxBounds: [[-90, -540], [90, 540]], 
+                maxBoundsViscosity: 0.5,
+            }).setView([36, 140], 5); 
+
+            map.zoomControl.setPosition('bottomright');
+
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; OpenStreetMap &copy; CARTO',
+                subdomains: 'abcd',
+                maxZoom: 19,
+                noWrap: false
+            }).addTo(map);
+
+            earthquakeLayer = L.layerGroup().addTo(map);
+            L.control.attribution({position: 'bottomright'}).addTo(map);
+        }
+
+        // --- 4. DATA FETCHING ---
+        async function fetchData() {
+            try {
+                const response = await fetch(CONFIG.usgsUrl);
+                const data = await response.json();
+                
+                processEarthquakes(data.features);
+                updateStats(data.features);
+                updateCameraFocus(data.features);
+
+            } catch (error) {
+                console.error("Data Fetch Error:", error);
+            }
+        }
+
+        function updateStats(features) {
+            const count = features.length;
+            const maxMag = Math.max(...features.map(f => f.properties.mag));
+            currentMaxMag = maxMag;
+
+            document.getElementById('count-display').innerText = count;
+            document.getElementById('max-mag-display').innerText = maxMag.toFixed(1);
+            
+            updateAlertStatus(maxMag);
+        }
+
+        function updateAlertStatus(maxMag) {
+            const statusEl = document.getElementById('status-display');
+            const alertBar = document.getElementById('alert-bar');
+
+            if(maxMag >= 6.0) {
+                statusEl.innerText = "DANGER";
+                statusEl.className = "text-lg font-bold text-red-500 blink leading-none";
+                
+                alertBar.style.display = 'block';
+                const warningText = maxMag >= 7.0 ? "EMERGENCY: M7+ CATASTROPHIC EVENT" : "WARNING: M6+ STRONG QUAKE DETECTED";
+                alertBar.innerText = `⚠ ${warningText} ⚠`;
+                
+            } else if(maxMag >= 4.5) {
+                statusEl.innerText = "CAUTION";
+                statusEl.className = "text-lg font-bold text-yellow-400 leading-none";
+                alertBar.style.display = 'none';
+            } else {
+                statusEl.innerText = "NORMAL";
+                statusEl.className = "text-lg font-bold text-green-400 leading-none";
+                alertBar.style.display = 'none';
+            }
+        }
+
+        // --- 5. CAMERA LOGIC ---
+        function updateCameraFocus(features) {
+            if (features.length === 0) return;
+
+            const sorted = [...features].sort((a, b) => a.properties.time - b.properties.time);
+            const filtered = sorted.filter(f => f.properties.mag >= CONFIG.minMag);
+            if (filtered.length === 0) return;
+            
+            const latest = filtered[filtered.length - 1];
+            const hugeEvent = sorted.find(f => f.properties.mag >= 7.0);
+
+            let target = latest;
+            if (hugeEvent) {
+                target = hugeEvent;
+                priorityEvent = hugeEvent;
+            } else {
+                priorityEvent = null;
+            }
+
+            const coords = target.geometry.coordinates;
+            const zoom = target.properties.mag >= 6.0 ? 6 : 5;
+
+            map.flyTo([coords[1], coords[0]], zoom, {
+                duration: 2.0,
+                easeLinearity: 0.25
+            });
+        }
+
+        // --- 6. PLOTTING & STYLING ---
+        function processEarthquakes(features) {
+            features.sort((a, b) => a.properties.time - b.properties.time);
+
+            if(knownEventIds.size > CONFIG.maxMarkers) {
+                earthquakeLayer.clearLayers();
+                knownEventIds.clear();
+                document.getElementById('event-list').innerHTML = '';
+            }
+
+            features.forEach(feature => {
+                const props = feature.properties;
+                const coords = feature.geometry.coordinates;
+                const id = feature.id;
+
+                if (props.mag < CONFIG.minMag) return;
+
+                if (!knownEventIds.has(id)) {
+                    knownEventIds.add(id);
+                    plotQuake(coords[1], coords[0], props.mag, props.place, props.time);
+                    plotQuake(coords[1], coords[0] - 360, props.mag, props.place, props.time);
+                    plotQuake(coords[1], coords[0] + 360, props.mag, props.place, props.time);
+                    
+                    if (props.mag >= 4.0) {
+                        updateEventList(feature);
+                    }
+
+                    const now = new Date().getTime();
+                    if (now - props.time < 3600000) {
+                        playQuakeSound(props.mag);
+                    }
+                }
+            });
+        }
+
+        function plotQuake(lat, lng, mag, place, time) {
+            let color = '#00f3ff';
+            let fillColor = '#00f3ff';
+            let radius = mag * 1.5;
+            let className = '';
+            let opacity = 0.4;
+
+            if (mag < 4.0) {
+                color = '#00f3ff'; radius = 2; 
+            } else if (mag < 4.5) {
+                color = '#00ff9d'; radius = mag * 1.5;
+            } else if (mag < 6.0) {
+                color = '#ffae00'; fillColor = '#ffae00'; radius = mag * 2.5; opacity = 0.6;
+            } else if (mag < 7.0) {
+                color = '#ff4000'; fillColor = '#ff4000'; radius = mag * 4; opacity = 0.7; className = 'quake-pulse';
+            } else {
+                color = '#ff0000'; fillColor = '#ff0055'; radius = mag * 6; opacity = 0.8; className = 'quake-pulse';
+            }
+
+            const marker = L.circleMarker([lat, lng], {
+                radius: radius, color: color, fillColor: fillColor, fillOpacity: opacity, weight: 1, className: className
+            });
+
+            const date = new Date(time).toLocaleTimeString('ja-JP');
+            marker.bindPopup(`
+                <div style="font-family: 'Noto Sans JP'; color: #000; font-size: 11px; line-height: 1.2;">
+                    <strong style="font-size: 13px;">M${mag.toFixed(1)}</strong><br>
+                    ${translatePlace(place)}<br>
+                    ${date}
+                </div>
+            `);
+            marker.addTo(earthquakeLayer);
+        }
+
+        function updateEventList(feature) {
+            const list = document.getElementById('event-list');
+            const item = document.createElement('div');
+            const props = feature.properties;
+            
+            let colorClass = 'text-cyan-300';
+            if (props.mag >= 7.0) colorClass = 'text-red-500 font-black';
+            else if (props.mag >= 6.0) colorClass = 'text-red-400 font-bold';
+            else if (props.mag >= 4.5) colorClass = 'text-yellow-400';
+            
+            item.className = `p-1.5 border-b border-gray-800 hover:bg-white/5 transition text-[10px]`;
+            item.innerHTML = `
+                <div class="flex justify-between items-center">
+                    <span class="${colorClass}">M${props.mag.toFixed(1)}</span>
+                    <span class="text-gray-400">${new Date(props.time).toLocaleTimeString('ja-JP')}</span>
+                </div>
+                <div class="truncate text-gray-300 w-full overflow-hidden">${translatePlace(props.place)}</div>
+            `;
+            
+            list.insertBefore(item, list.firstChild);
+            if(list.children.length > 10) list.removeChild(list.lastChild);
+        }
+
+        // --- 7. AUDIO ---
+        function initAudio() {
+            // Main Synth
+            synth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "triangle" },
+                envelope: { attack: 0.01, decay: 0.3, sustain: 0.1, release: 1 }
+            }).toDestination();
+            const reverb = new Tone.Reverb(3).toDestination();
+            synth.connect(reverb);
+
+            // Ambient Drone (Restored)
+            drone = new Tone.Noise("brown").start();
+            const filter = new Tone.AutoFilter({
+                frequency: "8m", min: 800, max: 15000
+            }).connect(Tone.Master);
+            drone.connect(filter);
+            drone.volume.value = -35; // Quiet background rumble
+        }
+
+        function playQuakeSound(mag) {
+            if (!isSystemActive) return;
+
+            let notes = [];
+            if (mag < 4.0) notes = ["C5"];
+            else if (mag < 5.0) notes = ["C4", "G4"];
+            else if (mag < 6.0) notes = ["C3", "G3", "C4"];
+            else if (mag < 7.0) notes = ["C2", "G2", "C3", "D#3"]; 
+            else notes = ["C1", "C2", "F#2", "A#2"];
+
+            const velocity = Math.min(mag / 8, 1);
+            synth.triggerAttackRelease(notes, "8n", undefined, velocity);
+        }
+
+        // --- UTILS ---
+        function translatePlace(place) {
+            if(!place) return "不明";
+            return place
+                .replace("[SIMULATION]", "【訓練/テスト】")
+                .replace("Japan", "日本")
+                .replace("near the coast of", "沿岸")
+                .replace("region", "地域")
+                .replace("Islands", "諸島")
+                .replace("Island", "島")
+                .replace("Southern", "南")
+                .replace("Northern", "北")
+                .replace("Eastern", "東")
+                .replace("Western", "西")
+                .replace("South of", "南:")
+                .replace("North of", "北:")
+                .replace("East of", "東:")
+                .replace("West of", "西:")
+                .replace("km", "km");
+        }
+
+        function updateClock() {
+            const now = new Date();
+            document.getElementById('clock').innerText = 
+                now.toLocaleTimeString('ja-JP') + " JST";
+        }
+    </script>
+</body>
+</html>
